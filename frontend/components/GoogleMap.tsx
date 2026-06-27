@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
+import L from 'leaflet';
 import { Itinerary, CandidatePlace } from '../types.ts';
 
 interface GoogleMapProps {
@@ -18,103 +19,82 @@ const DAY_COLORS = [
 
 const GoogleMap: React.FC<GoogleMapProps> = ({ itinerary, candidates }) => {
   const mapRef = useRef<HTMLDivElement>(null);
-  const [map, setMap] = useState<any>(null);
-  const markersRef = useRef<any[]>([]);
-  const polylinesRef = useRef<any[]>([]);
+  const mapInstanceRef = useRef<L.Map | null>(null);
+  const layerGroupRef = useRef<L.LayerGroup | null>(null);
 
-  // Initialize Google Maps script
+  // Initialize map
   useEffect(() => {
-    const w = window as any;
-    if (w.google && w.google.maps) {
-      initMap();
-      return;
-    }
+    if (!mapRef.current || mapInstanceRef.current) return;
+
+    // Create map instance
+    const map = L.map(mapRef.current).setView([20, 0], 2);
     
-    if (document.getElementById('google-maps-script')) return;
+    // Add OpenStreetMap tiles (Free, no API key required, fixes the watermark/error issue)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+    
+    // Create a layer group for our markers and polylines
+    const layerGroup = L.layerGroup().addTo(map);
+    
+    mapInstanceRef.current = map;
+    layerGroupRef.current = layerGroup;
 
-    const script = document.createElement('script');
-    script.id = 'google-maps-script';
-    // Uses environment variable if available, otherwise loads without key (development mode)
-    const apiKey = (process.env as any).GOOGLE_MAPS_API_KEY || '';
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
-    script.async = true;
-    script.defer = true;
-    script.onload = initMap;
-    document.head.appendChild(script);
+    // Cleanup on unmount
+    return () => {
+      map.remove();
+      mapInstanceRef.current = null;
+      layerGroupRef.current = null;
+    };
+  }, []);
 
-    function initMap() {
-      if (mapRef.current && !map) {
-        const newMap = new w.google.maps.Map(mapRef.current, {
-          center: { lat: 20, lng: 0 },
-          zoom: 2,
-          mapTypeControl: false,
-          streetViewControl: false,
-          fullscreenControl: false,
-        });
-        setMap(newMap);
-      }
-    }
-  }, [map]);
-
-  // Update map markers and polylines when itinerary or candidates change
+  // Update markers and polylines when data changes
   useEffect(() => {
-    const w = window as any;
-    if (!map || !w.google) return;
+    const map = mapInstanceRef.current;
+    const layerGroup = layerGroupRef.current;
 
-    // Clear existing markers and polylines
-    markersRef.current.forEach(m => m.setMap(null));
-    polylinesRef.current.forEach(p => p.setMap(null));
-    markersRef.current = [];
-    polylinesRef.current = [];
+    if (!map || !layerGroup) return;
 
-    const bounds = new w.google.maps.LatLngBounds();
+    // Clear existing layers
+    layerGroup.clearLayers();
+
+    const bounds = L.latLngBounds([]);
     let hasPoints = false;
+
+    const createIcon = (text: string, color: string) => {
+      return L.divIcon({
+        className: 'custom-marker',
+        html: `<div style="background-color: ${color}; width: 28px; height: 28px; border-radius: 50%; border: 2px solid white; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">${text}</div>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+      });
+    };
 
     // Plot Itinerary if available
     if (itinerary && itinerary.days.length > 0) {
       itinerary.days.forEach((day, dayIndex) => {
         const color = DAY_COLORS[dayIndex % DAY_COLORS.length];
-        const path: any[] = [];
+        const latlngs: L.LatLngExpression[] = [];
 
         day.stops.forEach((stop, stopIndex) => {
           if (typeof stop.lat !== 'number' || typeof stop.lng !== 'number') return;
           
-          const position = { lat: stop.lat, lng: stop.lng };
-          path.push(position);
-          bounds.extend(position);
+          const latlng: L.LatLngExpression = [stop.lat, stop.lng];
+          latlngs.push(latlng);
+          bounds.extend(latlng);
           hasPoints = true;
 
-          const marker = new w.google.maps.Marker({
-            position,
-            map,
-            title: stop.name,
-            label: {
-              text: `${stopIndex + 1}`,
-              color: 'white',
-              fontWeight: 'bold',
-              fontSize: '12px'
-            },
-            icon: {
-              path: w.google.maps.SymbolPath.CIRCLE,
-              fillColor: color,
-              fillOpacity: 1,
-              strokeColor: 'white',
-              strokeWeight: 2,
-              scale: 12,
-            }
-          });
-          markersRef.current.push(marker);
+          const marker = L.marker(latlng, {
+            icon: createIcon(`${stopIndex + 1}`, color),
+            title: stop.name
+          }).bindPopup(`<b>${stop.name}</b><br/>${stop.time}`);
+          
+          layerGroup.addLayer(marker);
         });
 
-        if (path.length > 1) {
-          const polyline = new w.google.maps.Polyline({
-            path,
-            map,
-            strokeColor: color,
-            strokeOpacity: 0.8,
-            strokeWeight: 4,
-          });
-          polylinesRef.current.push(polyline);
+        if (latlngs.length > 1) {
+          const polyline = L.polyline(latlngs, { color, weight: 4, opacity: 0.8 });
+          layerGroup.addLayer(polyline);
         }
       });
     } 
@@ -123,45 +103,30 @@ const GoogleMap: React.FC<GoogleMapProps> = ({ itinerary, candidates }) => {
       candidates.forEach((place) => {
         if (typeof place.lat !== 'number' || typeof place.lng !== 'number') return;
         
-        const position = { lat: place.lat, lng: place.lng };
-        bounds.extend(position);
+        const latlng: L.LatLngExpression = [place.lat, place.lng];
+        bounds.extend(latlng);
         hasPoints = true;
 
-        const marker = new w.google.maps.Marker({
-          position,
-          map,
-          title: place.name,
-          icon: {
-            path: w.google.maps.SymbolPath.CIRCLE,
-            fillColor: '#64748b', // slate-500
-            fillOpacity: 1,
-            strokeColor: 'white',
-            strokeWeight: 2,
-            scale: 10,
-          }
-        });
-        markersRef.current.push(marker);
+        const marker = L.marker(latlng, {
+          icon: createIcon('', '#64748b'), // slate-500
+          title: place.name
+        }).bindPopup(`<b>${place.name}</b><br/>Rating: ${place.rating}`);
+        
+        layerGroup.addLayer(marker);
       });
     }
 
     if (hasPoints) {
-      map.fitBounds(bounds);
-      // Prevent zooming in too close if there's only one point or points are very close
-      const listener = w.google.maps.event.addListener(map, "idle", () => { 
-        if (map.getZoom() > 15) map.setZoom(15); 
-        w.google.maps.event.removeListener(listener); 
-      });
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+    } else {
+      map.setView([20, 0], 2); // Reset view if no points
     }
-  }, [map, itinerary, candidates]);
+
+  }, [itinerary, candidates]);
 
   return (
-    <div className="w-full h-full bg-slate-100 rounded-2xl border-2 border-slate-200 overflow-hidden relative shadow-sm">
-      <div ref={mapRef} className="absolute inset-0" />
-      {!map && (
-        <div className="absolute inset-0 flex items-center justify-center bg-slate-50/80 backdrop-blur-sm">
-          <div className="animate-pulse text-slate-500 font-medium">Loading Map...</div>
-        </div>
-      )}
+    <div className="w-full h-full bg-slate-100 rounded-2xl border-2 border-slate-200 overflow-hidden relative shadow-sm z-0">
+      <div ref={mapRef} className="absolute inset-0 z-0" />
     </div>
   );
 };
